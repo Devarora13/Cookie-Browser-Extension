@@ -125,7 +125,7 @@
 
       const domain = extractDomain(message.url || message.domain);
       console.log('Fetching cookies for domain:', domain);
-      const cookies = await getCookiesForDomain(domain);
+      const cookies = await getAllRelevantCookies(domain);
       console.log('Found cookies:', cookies.length);
       
       const response = {
@@ -237,18 +237,33 @@
   }
 
   // Helper function to get cookies for a domain
-  async function getCookiesForDomain(domain) {
-    return new Promise(resolve => {
-      chrome.cookies.getAll({ domain: domain }, cookies => {
-        if (chrome.runtime.lastError) {
-          console.error('Cookie fetch error:', chrome.runtime.lastError);
-          resolve([]);
-        } else {
-          resolve(cookies || []);
-        }
-      });
-    });
+  // Get cookies for domain and all parent domains
+async function getAllRelevantCookies(domain) {
+  const domainParts = domain.split('.');
+  const domainsToCheck = [];
+
+  for (let i = 0; i <= domainParts.length - 2; i++) {
+    domainsToCheck.push(domainParts.slice(i).join('.'));
   }
+
+  const allCookies = [];
+
+  for (const d of domainsToCheck) {
+    const cookies = await new Promise(resolve => {
+      chrome.cookies.getAll({ domain: d }, resolve);
+    });
+    allCookies.push(...cookies);
+  }
+
+  // Deduplicate cookies by name + domain + path
+  const unique = {};
+  allCookies.forEach(c => {
+    unique[c.name + '|' + c.domain + '|' + c.path] = c;
+  });
+
+  return Object.values(unique);
+}
+
 
   // Helper function to extract domain from URL
   function extractDomain(url) {
@@ -300,8 +315,8 @@
       for (const [tabId, domain] of activeTabDomains.entries()) {
         if (domain === cookieDomain || cookieDomain.includes(domain) || domain.includes(cookieDomain)) {
           try {
-            const updatedCookies = await getCookiesForDomain(domain);
-            
+            const updatedCookies = await getAllRelevantCookies(domain);
+
             chrome.tabs.sendMessage(tabId, {
               type: 'REAL_TIME_COOKIE_UPDATE',
               cookies: updatedCookies,
