@@ -1,11 +1,12 @@
-// Content Script - Handles UI overlay and secure communication
+// Cookie Extension Content Script
 (function() {
   'use strict';
   
   let currentDomain = null;
   let overlayVisible = false;
+  let cookiesActivelyRequested = false; // Track if user actually clicked to see cookies
 
-  // Inject external CSS file securely
+  // Safely inject my custom CSS without conflicts
   function injectStyles() {
     if (document.getElementById('cookie-extension-styles')) return;
     
@@ -17,7 +18,7 @@
     document.head.appendChild(link);
   }
 
-  // Create the secure UI overlay
+  // Build the main overlay that shows cookie info
   function createOverlay() {
     if (document.getElementById('cookie-extension-overlay')) return;
 
@@ -49,7 +50,6 @@
       <div class="cookie-section">
         <button id="cookie-permission-btn" class="primary-btn">Grant Cookie Access</button>
         <div id="cookie-controls" class="cookie-controls" style="display: none;">
-          <button id="refresh-cookies-btn" class="secondary-btn">Refresh Cookies</button>
           <button id="clear-cookies-btn" class="danger-btn">Clear All Cookies</button>
           <button id="revoke-permission-btn" class="secondary-btn">Revoke Permission</button>
         </div>
@@ -68,14 +68,14 @@
     }
   }
 
-  // Escape HTML to prevent XSS
+  // Important: Always escape HTML to prevent XSS attacks
   function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
   }
 
-  // Set up secure event listeners
+  // Wire up all the button clicks and interactions
   function setupEventListeners() {
     const overlay = document.getElementById('cookie-extension-overlay');
     if (!overlay) return;
@@ -83,28 +83,79 @@
     // Close overlay
     overlay.querySelector('#close-overlay')?.addEventListener('click', hideOverlay);
 
-    // Permission button
-    overlay.querySelector('#cookie-permission-btn')?.addEventListener('click', requestCookiePermission);
+    // Permission button - handles both permission request and cookie fetching
+    overlay.querySelector('#cookie-permission-btn')?.addEventListener('click', handleCookiePermissionButton);
 
     // Cookie management buttons
-    overlay.querySelector('#refresh-cookies-btn')?.addEventListener('click', refreshCookies);
     overlay.querySelector('#clear-cookies-btn')?.addEventListener('click', clearDomainCookies);
     overlay.querySelector('#revoke-permission-btn')?.addEventListener('click', revokePermission);
   }
 
-  // Check initial permission state
+  // Check what permissions we already have when overlay first opens
   function checkInitialPermissionState() {
+    // Check if extension context is still valid
+    if (!chrome.runtime.id) {
+      console.log('Extension context invalidated, skipping permission check');
+      handleExtensionReload();
+      return;
+    }
+    
     sendSecureMessage({
       type: 'CHECK_PERMISSION',
       domain: currentDomain,
       url: location.href
+    }).catch(error => {
+      console.error('Failed to check initial permission state:', error);
     });
   }
 
-  // Request cookie permission from user
+  // This button does double duty - requests permission OR shows cookies
+  function handleCookiePermissionButton() {
+    const btn = document.getElementById('cookie-permission-btn');
+    if (!btn) return;
+    
+    const buttonText = btn.textContent;
+    
+    if (buttonText === 'Grant Cookie Access') {
+      // First time - need to request permission
+      requestCookiePermission();
+    } else if (buttonText === 'Show Cookies') {
+      // Permission already granted, user wants to see the actual cookies
+      cookiesActivelyRequested = true;
+      btn.textContent = 'Loading...';
+      btn.disabled = true;
+      fetchCookiesForDisplay();
+      // Give some feedback to user, then reset button
+      setTimeout(() => {
+        btn.textContent = 'Show Cookies';
+        btn.disabled = false;
+      }, 1000);
+    }
+  }
+
+  // Separate function just for fetching cookies when user clicks
+  function fetchCookiesForDisplay() {
+    sendSecureMessage({
+      type: 'FETCH_COOKIES',
+      domain: currentDomain,
+      url: location.href
+    }).catch(error => {
+      console.error('Failed to fetch cookies:', error);
+      updateCookieList('Failed to fetch cookies. Please try again.');
+    });
+  }
+
+  // Ask Chrome for permission to access cookies
   function requestCookiePermission() {
     updatePermissionButton('Requesting permission...', true);
     console.log('Requesting cookie permission for domain:', currentDomain);
+    
+    // Make sure extension hasn't been reloaded/disabled
+    if (!chrome.runtime.id) {
+      console.log('Extension context invalidated during permission request');
+      handleExtensionReload();
+      return;
+    }
     
     const message = {
       type: 'REQUEST_COOKIE_PERMISSION',
@@ -118,23 +169,19 @@
       })
       .catch(error => {
         console.error('Permission request failed:', error);
+        
+        // Handle extension context invalidated error
+        if (error.message && error.message.includes('Extension context invalidated')) {
+          handleExtensionReload();
+          return;
+        }
+        
         updatePermissionButton('Request Failed - Click to Retry', false);
         updateCookieList('Failed to request permission. Please try again.');
       });
   }
 
-  // Refresh cookie display
-  function refreshCookies() {
-    updateCookieList('Refreshing cookies...');
-    
-    sendSecureMessage({
-      type: 'FETCH_COOKIES',
-      domain: currentDomain,
-      url: location.href
-    });
-  }
-
-  // Clear all cookies for current domain
+  // Nuclear option - delete all cookies for this domain
   function clearDomainCookies() {
     if (!confirm(`Are you sure you want to clear all cookies for ${currentDomain}?`)) {
       return;
@@ -146,10 +193,13 @@
       type: 'CLEAR_DOMAIN_COOKIES',
       domain: currentDomain,
       url: location.href
+    }).catch(error => {
+      console.error('Failed to clear cookies:', error);
+      updateCookieList('Failed to clear cookies. Please try again.');
     });
   }
 
-  // Revoke cookie permission
+  // Let user take back permission if they want
   function revokePermission() {
     if (!confirm('Are you sure you want to revoke cookie access? This will hide all cookie data.')) {
       return;
@@ -157,19 +207,31 @@
     
     sendSecureMessage({
       type: 'REVOKE_COOKIE_PERMISSION'
+    }).then(response => {
+      console.log('Revoke permission response:', response);
+      // Handle the response directly since it comes via sendResponse, not onMessage
+      if (response && response.type === 'PERMISSION_REVOKED') {
+        showPermissionRevoked();
+      } else if (response && response.type === 'ERROR') {
+        updateCookieList(`Error: ${escapeHtml(response.message)}`);
+      }
+    }).catch(error => {
+      console.error('Failed to revoke permission:', error);
+      updateCookieList('Failed to revoke permission. Please try again.');
     });
   }
 
-  // Hide the overlay
+  // Clean up when user closes the overlay
   function hideOverlay() {
     const overlay = document.getElementById('cookie-extension-overlay');
     if (overlay) {
       overlay.remove();
       overlayVisible = false;
+      cookiesActivelyRequested = false; // Reset state
     }
   }
 
-  // Update permission button state
+  // Helper to update the main permission button
   function updatePermissionButton(text, disabled = false) {
     const btn = document.getElementById('cookie-permission-btn');
     if (btn) {
@@ -178,7 +240,7 @@
     }
   }
 
-  // Update cookie list display
+  // This updates the cookie display area with content or error messages
   function updateCookieList(content) {
     console.log('updateCookieList called with content type:', typeof content);
     const listElement = document.getElementById('cookie-list');
@@ -186,12 +248,12 @@
     
     if (listElement) {
       if (typeof content === 'string') {
-        // Check if content contains HTML tags (raw HTML) or should be escaped
+        // Check if this is raw HTML content or plain text that needs escaping
         if (content.includes('<div class="cookies-header">') || content.includes('<div class="cookie-item">')) {
-          // Raw HTML content
+          // It's HTML content, insert directly
           listElement.innerHTML = content;
         } else {
-          // Text content that should be escaped and wrapped
+          // Plain text - escape it and wrap in a status div
           listElement.innerHTML = `<div class="status-message">${escapeHtml(content)}</div>`;
         }
       } else {
@@ -209,26 +271,38 @@
     const cookieControls = document.getElementById('cookie-controls');
     
     if (permissionBtn) {
-      permissionBtn.style.display = 'none';
+      // Change button to "Show Cookies" as per requirements
+      permissionBtn.textContent = 'Show Cookies';
+      permissionBtn.disabled = false;
+      permissionBtn.style.display = 'block';
     }
     
     if (cookieControls) {
       cookieControls.style.display = 'block';
     }
     
-    // Automatically fetch cookies when permission is granted
-    refreshCookies();
+    // Never auto-fetch cookies - user must always click "Show Cookies"
+    updateCookieList('Click "Show Cookies" to view cookies for this domain.');
   }
 
   // Show permission denied state
   function showPermissionDenied() {
-    updatePermissionButton('Permission Denied - Click to Retry', false);
-    updateCookieList('Cookie access denied. Click "Permission Denied" button to try again.');
+    updatePermissionButton('Access Denied', true); // Disabled as per requirements
+    updateCookieList('Cookie access denied. The extension needs cookie permission to display cookies for this domain.');
     
     const cookieControls = document.getElementById('cookie-controls');
     if (cookieControls) {
       cookieControls.style.display = 'none';
     }
+    
+    // Add a way for user to try again after some time
+    setTimeout(() => {
+      const btn = document.getElementById('cookie-permission-btn');
+      if (btn && btn.textContent === 'Access Denied') {
+        btn.textContent = 'Grant Cookie Access';
+        btn.disabled = false;
+      }
+    }, 3000); // Allow retry after 3 seconds
   }
 
   // Show permission revoked state
@@ -246,7 +320,10 @@
       cookieControls.style.display = 'none';
     }
     
-    updateCookieList('Cookie permission revoked. Grant permission to view cookies.');
+    // Reset the actively requested flag
+    cookiesActivelyRequested = false;
+    
+    updateCookieList('Cookie permission revoked. Click "Grant Cookie Access" to access cookies again.');
   }
 
   // Display cookies in a secure, formatted way
@@ -255,7 +332,7 @@
     
     if (!cookies || cookies.length === 0) {
       console.log('No cookies to display');
-      updateCookieList('<div class="no-cookies">No cookies found for this domain.</div>');
+      updateCookieList('No cookies found for this domain.');
       return;
     }
 
@@ -303,13 +380,53 @@
       })
       .catch(error => {
         console.error('Cookie Extension: Message sending failed', error);
+        
+        // Handle extension context invalidated error
+        if (error.message && error.message.includes('Extension context invalidated')) {
+          console.log('Extension was reloaded, cleaning up...');
+          handleExtensionReload();
+          return;
+        }
+        
         updateCookieList('Communication error with extension background script.');
         throw error;
       });
   }
 
+  // Handle extension reload/invalidation
+  function handleExtensionReload() {
+    const overlay = document.getElementById('cookie-extension-overlay');
+    if (overlay) {
+      // Show a user-friendly message
+      const listElement = document.getElementById('cookie-list');
+      if (listElement) {
+        listElement.innerHTML = `
+          <div class="status-message" style="color: #e53e3e; text-align: center;">
+            <strong>⚠️ Extension Reloaded</strong><br>
+            <small>Please close and reopen this overlay to continue using the extension.</small>
+          </div>
+        `;
+      }
+      
+      // Disable all buttons
+      const buttons = overlay.querySelectorAll('button');
+      buttons.forEach(btn => {
+        if (btn.id !== 'close-overlay') {
+          btn.disabled = true;
+          btn.style.opacity = '0.5';
+        }
+      });
+    }
+  }
+
   // Handle messages from background script
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // Check if extension context is still valid
+    if (!chrome.runtime.id) {
+      console.log('Extension context invalidated, ignoring message');
+      return;
+    }
+    
     console.log('Message received:', message);
     
     // Verify the message is from our extension
@@ -324,6 +441,7 @@
         case 'PERMISSION_CHECK_RESULT':
           console.log('Handling PERMISSION_CHECK_RESULT');
           if (message.hasPermission) {
+            // Permission exists but don't auto-fetch cookies - user must click button
             showPermissionGranted();
           } else {
             updatePermissionButton('Grant Cookie Access', false);
@@ -333,6 +451,7 @@
 
         case 'PERMISSION_GRANTED':
           console.log('Handling PERMISSION_GRANTED');
+          // Permission newly granted - still require user to click "Show Cookies"
           showPermissionGranted();
           break;
 
@@ -354,14 +473,13 @@
         case 'COOKIES_CLEARED':
           console.log('Handling COOKIES_CLEARED');
           updateCookieList('All cookies cleared for this domain.');
-          // Refresh to show current state
-          setTimeout(refreshCookies, 500);
+          // The real-time listener will automatically update with the new state
           break;
 
         case 'REAL_TIME_COOKIE_UPDATE':
           console.log('Handling REAL_TIME_COOKIE_UPDATE');
-          // Only update if overlay is visible and for current domain
-          if (overlayVisible && message.domain === currentDomain) {
+          // Only update if overlay is visible, for current domain, AND user has actively requested cookies
+          if (overlayVisible && message.domain === currentDomain && cookiesActivelyRequested) {
             displayCookies(message.cookies);
           }
           break;
@@ -395,6 +513,24 @@
   // Clean up when page is unloaded
   window.addEventListener('beforeunload', () => {
     hideOverlay();
+  });
+
+  // Global error handler for extension context invalidation
+  window.addEventListener('error', (event) => {
+    if (event.error && event.error.message && event.error.message.includes('Extension context invalidated')) {
+      console.log('Caught extension context invalidated error globally');
+      event.preventDefault(); // Prevent the error from appearing in console
+      handleExtensionReload();
+    }
+  });
+
+  // Handle unhandled promise rejections
+  window.addEventListener('unhandledrejection', (event) => {
+    if (event.reason && event.reason.message && event.reason.message.includes('Extension context invalidated')) {
+      console.log('Caught extension context invalidated promise rejection');
+      event.preventDefault(); // Prevent the error from appearing in console
+      handleExtensionReload();
+    }
   });
 
 })();

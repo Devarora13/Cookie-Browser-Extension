@@ -1,13 +1,13 @@
-// Background Service Worker - Handles permissions and cookie operations
+// Background Script - Service Worker that handles all the cookie operations
 (function() {
   'use strict';
 
-  // Track cookie change listeners per tab
+  // Keep track of which tabs are monitoring which domains for real-time updates
   const activeTabDomains = new Map();
   
-  // Handle messages from content scripts
+  // Main message handler - routes messages from content scripts to appropriate handlers
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    // Handle async operations properly
+    // Using async IIFE pattern to handle async operations properly
     (async () => {
       try {
         switch (message.type) {
@@ -41,10 +41,10 @@
       }
     })();
     
-    return true; // Keep the message channel open for async responses
+    return true; // Important: keeps the message channel open for async responses
   });
 
-  // Check if we have cookie permission
+  // Simple check to see if we currently have cookie permission
   async function handlePermissionCheck(message, sender, sendResponse) {
     try {
       const hasPermission = await checkCookiePermission();
@@ -92,12 +92,6 @@
         
         // Send permission granted response
         chrome.tabs.sendMessage(sender.tab.id, { type: 'PERMISSION_GRANTED' });
-        
-        // Also send initial cookie data
-        setTimeout(async () => {
-          console.log('Sending initial cookie data after permission grant');
-          await handleFetchCookies(message, sender, () => {});
-        }, 100);
         
         sendResponse({ type: 'PERMISSION_GRANTED' });
       } else {
@@ -155,35 +149,52 @@
   // Clear all cookies for a domain
   async function handleClearDomainCookies(message, sender, sendResponse) {
     try {
+      console.log('handleClearDomainCookies called for domain:', message.domain || message.url);
       const hasPermission = await checkCookiePermission();
       
       if (!hasPermission) {
-        sendResponse({ type: 'ERROR', message: 'Cookie permission not granted' });
+        console.log('No cookie permission for clearing');
+        const errorMsg = { type: 'ERROR', message: 'Cookie permission not granted' };
+        chrome.tabs.sendMessage(sender.tab.id, errorMsg);
+        sendResponse(errorMsg);
         return;
       }
 
       const domain = extractDomain(message.url || message.domain);
+      console.log('Clearing cookies for domain:', domain);
       const cookies = await getCookiesForDomain(domain);
+      console.log('Found cookies to clear:', cookies.length);
       
       // Remove each cookie
       const removePromises = cookies.map(cookie => {
         const url = constructCookieUrl(cookie);
+        console.log('Removing cookie:', cookie.name, 'from URL:', url);
         return new Promise(resolve => {
           chrome.cookies.remove({
             url: url,
             name: cookie.name,
             storeId: cookie.storeId
-          }, resolve);
+          }, (result) => {
+            console.log('Cookie removal result for', cookie.name, ':', result);
+            resolve(result);
+          });
         });
       });
 
       await Promise.all(removePromises);
+      console.log('All cookies cleared successfully');
       
-      sendResponse({ type: 'COOKIES_CLEARED', domain: domain });
+      const response = { type: 'COOKIES_CLEARED', domain: domain };
+      
+      // Send via both methods to ensure delivery
+      chrome.tabs.sendMessage(sender.tab.id, response);
+      sendResponse(response);
       
     } catch (error) {
       console.error('Clear cookies error:', error);
-      sendResponse({ type: 'ERROR', message: 'Failed to clear cookies' });
+      const errorMsg = { type: 'ERROR', message: 'Failed to clear cookies' };
+      chrome.tabs.sendMessage(sender.tab.id, errorMsg);
+      sendResponse(errorMsg);
     }
   }
 
