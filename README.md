@@ -242,19 +242,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 - ✅ **Opera 74+** (Chromium-based)
 - ❌ **Firefox** (Manifest V3 still in development)
 
-## 🔮 Future Enhancements
-
-### Potential Improvements
-- **Cookie Import/Export**: Backup and restore functionality
-- **Cookie Filtering**: Search and filter by name, value, or attributes
-- **Privacy Analysis**: Detection of tracking cookies and privacy recommendations  
-- **Cookie History**: Track cookie changes over time
-- **Batch Management**: Select multiple cookies for operations
-
-### Security Enhancements
-- **Certificate Pinning**: Additional HTTPS validation
-- **Privacy Mode Detection**: Behavior adaptation for incognito mode
-- **Consent Management**: Integration with privacy frameworks
 
 ## 🤝 Contributing
 
